@@ -1,5 +1,6 @@
 "use client";
 
+import { BACKENDURL } from "@/env";
 import Hls from "hls.js";
 import { useEffect, useMemo, useRef, useState } from "react";
 
@@ -15,7 +16,7 @@ export default function VideoPlayer({ id }: { id: string }) {
   const [currentLevel, setCurrentLevel] = useState(-1);
 
   const src = useMemo(
-    () => `http://localhost:8080/hls/${id}/master.m3u8`,
+    () => `${BACKENDURL}/hls/${id}/master.m3u8`,
     [id],
   );
 

@@ -1,43 +1,122 @@
 "use client";
 
-import { useRef, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 
-type Status = "IDLE" | "UPLOADING" | "PROCESSING";
+type Status = "IDLE" | "UPLOADING" | "PROCESSING" | "ERROR";
+import { BACKENDURL } from "@/env";
+
+
+
+const POLL_INTERVAL_MS = 2000;
+const POLL_TIMEOUT_MS = 5 * 60 * 1000; // give up after 5 minutes
 
 export default function UploadPage() {
   const [status, setStatus] = useState<Status>("IDLE");
+  const [errorMessage, setErrorMessage] = useState<string | null>(null);
   const [file, setFile] = useState<File | null>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
+
+  // Track the interval/timeout so we can clear them on unmount or completion
+  const pollIntervalRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  const pollTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  // Clean up any in-flight polling if the component unmounts
+  useEffect(() => {
+    return () => {
+      if (pollIntervalRef.current) clearInterval(pollIntervalRef.current);
+      if (pollTimeoutRef.current) clearTimeout(pollTimeoutRef.current);
+    };
+  }, []);
+
+  function stopPolling() {
+    if (pollIntervalRef.current) {
+      clearInterval(pollIntervalRef.current);
+      pollIntervalRef.current = null;
+    }
+    if (pollTimeoutRef.current) {
+      clearTimeout(pollTimeoutRef.current);
+      pollTimeoutRef.current = null;
+    }
+  }
 
   async function handleSubmit(e: React.FormEvent<HTMLFormElement>) {
     e.preventDefault();
     if (!file) return;
 
     setStatus("UPLOADING");
+    setErrorMessage(null);
 
-    const formData = new FormData(e.currentTarget);
-    formData.set("video", file);
+    try {
+      const formData = new FormData(e.currentTarget);
+      formData.set("video", file);
 
-    const res = await fetch("http://localhost:8080/api/videos/upload", {
-      method: "POST",
-      body: formData,
-    });
+      const res = await fetch(`${BACKENDURL}/api/videos/upload`, {
+        method: "POST",
+        body: formData,
+      });
 
-    const data = await res.json();
-    setStatus("PROCESSING");
-    pollStatus(data.id);
+      if (!res.ok) {
+        const text = await res.text().catch(() => "");
+        throw new Error(
+          `Upload failed (${res.status}): ${text || res.statusText}`
+        );
+      }
+
+      const data = await res.json();
+
+      if (!data?.id) {
+        throw new Error("Upload succeeded but no video id was returned.");
+      }
+
+      setStatus("PROCESSING");
+      pollStatus(data.id);
+    } catch (err) {
+      console.error("[UPLOAD] failed:", err);
+      setStatus("ERROR");
+      setErrorMessage(
+        err instanceof Error ? err.message : "Something went wrong during upload."
+      );
+    }
   }
 
   function pollStatus(id: string) {
-    const interval = setInterval(async () => {
-      const res = await fetch(`http://localhost:8080/api/videos/${id}/status`);
-      const data = await res.json();
+    stopPolling(); // just in case one is already running
 
-      if (data.status === "READY") {
-        clearInterval(interval);
-        window.location.href = `/videos/${id}`;
+    pollIntervalRef.current = setInterval(async () => {
+      try {
+        const res = await fetch(`${BACKENDURL}/api/videos/${id}/status`);
+
+        if (!res.ok) {
+          throw new Error(`Status check failed (${res.status})`);
+        }
+
+        const data = await res.json();
+
+        if (data.status === "READY") {
+          stopPolling();
+          window.location.href = `/videos/${id}`;
+        }
+        // if status is still PROCESSING, keep polling silently
+      } catch (err) {
+        console.error("[POLL] failed:", err);
+        stopPolling();
+        setStatus("ERROR");
+        setErrorMessage(
+          err instanceof Error
+            ? err.message
+            : "Lost connection while checking video status."
+        );
       }
-    }, 2000);
+    }, POLL_INTERVAL_MS);
+
+    // Give up after POLL_TIMEOUT_MS so the UI never hangs forever
+    pollTimeoutRef.current = setTimeout(() => {
+      stopPolling();
+      setStatus("ERROR");
+      setErrorMessage(
+        "Processing is taking longer than expected. Please check back later."
+      );
+    }, POLL_TIMEOUT_MS);
   }
 
   function onDrop(e: React.DragEvent) {
@@ -45,6 +124,19 @@ export default function UploadPage() {
     const droppedFile = e.dataTransfer.files?.[0];
     if (droppedFile) setFile(droppedFile);
   }
+
+  function openFileDialog() {
+    fileInputRef.current?.click();
+  }
+
+  function onDropzoneKeyDown(e: React.KeyboardEvent) {
+    if (e.key === "Enter" || e.key === " ") {
+      e.preventDefault();
+      openFileDialog();
+    }
+  }
+
+  const isBusy = status === "UPLOADING" || status === "PROCESSING";
 
   return (
     <div style={styles.wrapper}>
@@ -59,9 +151,13 @@ export default function UploadPage() {
           {/* Dropzone */}
           <div
             style={styles.dropzone}
+            role="button"
+            tabIndex={0}
+            aria-label="Choose or drop a video file"
             onDragOver={(e) => e.preventDefault()}
             onDrop={onDrop}
-            onClick={() => fileInputRef.current?.click()}
+            onClick={openFileDialog}
+            onKeyDown={onDropzoneKeyDown}
           >
             <input
               ref={fileInputRef}
@@ -94,11 +190,11 @@ export default function UploadPage() {
           {/* Button */}
           <button
             type="submit"
-            disabled={status !== "IDLE"}
+            disabled={isBusy}
             style={{
               ...styles.button,
-              opacity: status === "IDLE" ? 1 : 0.6,
-              cursor: status === "IDLE" ? "pointer" : "not-allowed",
+              opacity: isBusy ? 0.6 : 1,
+              cursor: isBusy ? "not-allowed" : "pointer",
             }}
           >
             Upload
@@ -110,6 +206,11 @@ export default function UploadPage() {
           )}
           {status === "PROCESSING" && (
             <p style={styles.status}>Processing video…</p>
+          )}
+          {status === "ERROR" && (
+            <p style={{ ...styles.status, ...styles.errorStatus }}>
+              {errorMessage || "Something went wrong."}
+            </p>
           )}
         </form>
       </div>
@@ -180,28 +281,27 @@ const styles: Record<string, React.CSSProperties> = {
     fontSize: 12,
     opacity: 0.6,
   },
-fileName: {
-  fontSize: 13,
-  fontWeight: 600,
-  color: "#000",
-  padding: "8px 12px",
-  border: "1px solid #000",
-  display: "inline-block",
-  maxWidth: "100%",
-  overflow: "hidden",
-  textOverflow: "ellipsis",
-  whiteSpace: "nowrap",
-  background: "#fff",
-},
 
-
+  fileName: {
+    fontSize: 13,
+    fontWeight: 600,
+    color: "#000",
+    padding: "8px 12px",
+    border: "1px solid #000",
+    display: "inline-block",
+    maxWidth: "100%",
+    overflow: "hidden",
+    textOverflow: "ellipsis",
+    whiteSpace: "nowrap",
+    background: "#fff",
+  },
 
   input: {
     padding: 12,
     fontSize: 14,
     border: "1px solid #000",
     outline: "none",
-    color:"black"
+    color: "black",
   },
 
   button: {
@@ -213,15 +313,19 @@ fileName: {
     fontWeight: 600,
   },
 
-status: {
-  fontSize: 12,
-  fontWeight: 600,
-  letterSpacing: "0.5px",
-  textTransform: "uppercase",
-  borderTop: "1px solid #000",
-  paddingTop: 12,
-  marginTop: 8,
-  color: "#000",
-},
+  status: {
+    fontSize: 12,
+    fontWeight: 600,
+    letterSpacing: "0.5px",
+    textTransform: "uppercase",
+    borderTop: "1px solid #000",
+    paddingTop: 12,
+    marginTop: 8,
+    color: "#000",
+  },
 
+  errorStatus: {
+    color: "#b00020",
+    borderTop: "1px solid #b00020",
+  },
 };

@@ -1,5 +1,9 @@
 import Link from "next/link";
 import Image from "next/image";
+import { BACKENDURL } from "@/env";
+
+
+export const dynamic = "force-dynamic";
 
 type Video = {
   _id: string;
@@ -10,16 +14,30 @@ type Video = {
   createdAt?: string; // optional ISO string
 };
 
-async function getVideos(): Promise<Video[]> {
-  const res = await fetch("http://localhost:8080/api/videos", {
-    cache: "no-store",
-  });
+type GetVideosResult =
+  | { ok: true; videos: Video[] }
+  | { ok: false; error: string };
 
-  if (!res.ok) {
-    throw new Error(`Failed to fetch videos: ${res.status}`);
+async function getVideos(): Promise<GetVideosResult> {
+  try {
+    const res = await fetch(`${BACKENDURL}/api/videos`, {
+      cache: "no-store",
+    });
+
+    if (!res.ok) {
+      return { ok: false, error: `Failed to fetch videos (${res.status})` };
+    }
+
+    const videos = await res.json();
+    return { ok: true, videos };
+  } catch (err) {
+    console.error("[VIDEOS] fetch failed:", err);
+    return {
+      ok: false,
+      error:
+        "Couldn't reach the video service. Please check your connection and try again.",
+    };
   }
-
-  return res.json();
 }
 
 function formatDuration(seconds?: number) {
@@ -37,7 +55,8 @@ function formatDate(iso?: string) {
 }
 
 export default async function Page() {
-  const videos = await getVideos();
+  const result = await getVideos();
+  const videos = result.ok ? result.videos : [];
 
   return (
     <main style={{ maxWidth: 1100, margin: "0 auto", padding: "28px 16px" }}>
@@ -112,7 +131,23 @@ export default async function Page() {
         </select>
       </div>
 
-      {(!videos || videos.length === 0) && (
+      {!result.ok && (
+        <section
+          style={{
+            border: "1px solid rgba(176,0,32,0.3)",
+            background: "rgba(176,0,32,0.05)",
+            borderRadius: 16,
+            padding: 18,
+          }}
+        >
+          <h2 style={{ margin: 0, fontSize: 18, color: "#b00020" }}>
+            Couldn't load videos
+          </h2>
+          <p style={{ margin: "8px 0 0", opacity: 0.85 }}>{result.error}</p>
+        </section>
+      )}
+
+      {result.ok && videos.length === 0 && (
         <section
           style={{
             border: "1px solid rgba(0,0,0,0.12)",
@@ -140,7 +175,7 @@ export default async function Page() {
         </section>
       )}
 
-      {videos?.length > 0 && (
+      {result.ok && videos.length > 0 && (
         <section
           style={{
             display: "grid",
